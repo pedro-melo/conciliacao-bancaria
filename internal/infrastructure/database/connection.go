@@ -5,13 +5,14 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	_ "github.com/lib/pq" // Driver PostgreSQL
 )
 
-// DatabaseConfig contém as configurações para conexão com o banco de dados
-type DatabaseConfig struct {
+// DBConfig representa a configuração de conexão com o banco de dados
+type DBConfig struct {
 	Host     string
 	Port     string
 	User     string
@@ -20,28 +21,35 @@ type DatabaseConfig struct {
 	SSLMode  string
 }
 
-// Connection gerencia a conexão com o banco de dados
+// Connection representa uma conexão com o banco de dados
 type Connection struct {
-	db *sql.DB
+	DB *sql.DB
 }
 
-// NewConnection cria uma nova instância de conexão com o banco de dados
-func NewConnection(config DatabaseConfig) (*Connection, error) {
-	// Construir a string de conexão
-	connStr := fmt.Sprintf(
+// NewConnection cria uma nova conexão com o banco de dados
+func NewConnection() (*Connection, error) {
+	config := DBConfig{
+		Host:     getEnv("DB_HOST", "localhost"),
+		Port:     getEnv("DB_PORT", "5432"),
+		User:     getEnv("DB_USER", "postgres"),
+		Password: getEnv("DB_PASSWORD", "postgres"),
+		DBName:   getEnv("DB_NAME", "conciliacao"),
+		SSLMode:  getEnv("DB_SSLMODE", "disable"),
+	}
+
+	connectionString := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		config.Host, config.Port, config.User, config.Password, config.DBName, config.SSLMode,
 	)
 
-	// Abrir conexão com o banco de dados
-	db, err := sql.Open("postgres", connStr)
+	db, err := sql.Open("postgres", connectionString)
 	if err != nil {
-		return nil, fmt.Errorf("falha ao conectar ao banco de dados: %w", err)
+		return nil, fmt.Errorf("falha ao abrir conexão com o banco de dados: %w", err)
 	}
 
-	// Configurar pool de conexões
+	// Configurar o pool de conexões
 	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(25)
+	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	// Verificar se a conexão está funcionando
@@ -49,54 +57,25 @@ func NewConnection(config DatabaseConfig) (*Connection, error) {
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
-		return nil, fmt.Errorf("falha ao conectar ao banco de dados: %w", err)
+		return nil, fmt.Errorf("falha ao conectar no banco de dados: %w", err)
 	}
 
 	log.Println("Conexão com o banco de dados estabelecida com sucesso")
-	return &Connection{db: db}, nil
-}
-
-// GetDB retorna a instância do banco de dados
-func (c *Connection) GetDB() *sql.DB {
-	return c.db
+	return &Connection{DB: db}, nil
 }
 
 // Close fecha a conexão com o banco de dados
 func (c *Connection) Close() error {
-	if c.db != nil {
-		return c.db.Close()
+	if c.DB != nil {
+		return c.DB.Close()
 	}
 	return nil
 }
 
-// ExecuteTransaction executa uma função dentro de uma transação
-func (c *Connection) ExecuteTransaction(ctx context.Context, fn func(*sql.Tx) error) error {
-	tx, err := c.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("erro ao iniciar transação: %w", err)
+// getEnv retorna o valor da variável de ambiente ou um valor padrão
+func getEnv(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
 	}
-
-	defer func() {
-		if p := recover(); p != nil {
-			// Garantir que a transação seja revertida em caso de pânico
-			_ = tx.Rollback()
-			panic(p) // Re-lançar o pânico após o rollback
-		}
-	}()
-
-	// Executar a função passada dentro da transação
-	if err := fn(tx); err != nil {
-		// Reverter em caso de erro
-		if rbErr := tx.Rollback(); rbErr != nil {
-			return fmt.Errorf("erro na transação: %v, rollback falhou: %w", err, rbErr)
-		}
-		return err
-	}
-
-	// Commit da transação se tudo estiver OK
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("erro ao fazer commit da transação: %w", err)
-	}
-
-	return nil
+	return defaultValue
 }
